@@ -39,7 +39,10 @@ export async function loadConfig(): Promise<DblyConfig> {
     const source = await fs.readFile(CONFIG_PATH, "utf8");
     const root = asRecord(YAML.parse(source), "top level");
     const rawConnections = asRecord(root.connections, "connections");
-    const connections: Record<string, ConnectionConfig> = {};
+    const connections = Object.create(null) as Record<
+      string,
+      ConnectionConfig
+    >;
 
     for (const [name, rawConnection] of Object.entries(rawConnections)) {
       validateConnectionName(name);

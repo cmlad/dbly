@@ -19,6 +19,7 @@ class FakeClient {
   public readonly connection: { stream: { destroy: () => void } };
   public endCalls = 0;
   public destroyed = false;
+  public errorListenerCount = 0;
 
   public constructor(
     private readonly queryHandler: (text: string) => Promise<unknown>,
@@ -49,7 +50,10 @@ class FakeClient {
     this.onClose();
   }
 
-  public on(): this {
+  public on(event: string): this {
+    if (event === "error") {
+      this.errorListenerCount += 1;
+    }
     return this;
   }
 }
@@ -107,7 +111,7 @@ test("reuses one client and serializes runs for a document", async () => {
   await registry.disposeAll();
 });
 
-test("bounds reconnect termination, retains cleanup, and cancels queued runs", async () => {
+test("reconnect releases preflight reservations", { timeout: 2_000 }, async () => {
   const queryStarted = deferred<void>();
   const activeQuery = deferred<unknown>();
   let activeClosed = false;
@@ -171,11 +175,19 @@ test("bounds reconnect termination, retains cleanup, and cancels queued runs", a
   assert.equal(outcome.hadSession, true);
   assert.match(outcome.terminateWarning ?? "", /timed out terminating/);
   assert.equal(terminator.destroyed, true);
+  assert.equal(terminator.errorListenerCount, 1);
   assert.equal(session.endCalls, 1);
 
   const preflight = registry.reserve("file:///preflight.sql");
   const noSession = await registry.reconnect("file:///preflight.sql");
   assert.equal(noSession.hadSession, false);
+  const freshSession = new FakeClient((sql) =>
+    Promise.resolve(queryResult(sql)),
+  );
+  clients.push(freshSession);
+  await registry
+    .reserve("file:///preflight.sql")
+    .execute("local", CONNECTION, async () => undefined, "SELECT fresh");
   await assert.rejects(
     preflight.execute(
       "local",
@@ -187,7 +199,7 @@ test("bounds reconnect termination, retains cleanup, and cancels queued runs", a
   );
 });
 
-test("document cutover closes PostgreSQL state before BigQuery", async () => {
+test("document cutover releases queued PostgreSQL state", { timeout: 2_000 }, async () => {
   const session = new FakeClient((sql) => Promise.resolve(queryResult(sql)));
   const registry = new PostgresSessionRegistry(
     () => undefined,
@@ -200,6 +212,9 @@ test("document cutover closes PostgreSQL state before BigQuery", async () => {
   const pending = registry.reserve("file:///cutover.sql");
   await registry.closeDocument("file:///cutover.sql");
   assert.equal(session.endCalls, 1);
+  await registry
+    .reserve("file:///cutover.sql")
+    .execute("local", CONNECTION, async () => undefined, "SELECT fresh");
   await assert.rejects(
     pending.execute(
       "local",

@@ -44,6 +44,11 @@ const DEFAULT_TIMEOUTS: SessionTimeouts = {
   clientEndMs: 2_000,
 };
 
+interface PendingReservationNode {
+  generation: number;
+  cancel(): void;
+}
+
 export interface PostgresRunReservation {
   execute(
     connectionName: string,
@@ -58,6 +63,10 @@ export class PostgresSessionRegistry {
   private readonly entries = new Map<string, PostgresSessionEntry>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly generations = new Map<string, number>();
+  private readonly pendingReservations = new Map<
+    string,
+    Set<PendingReservationNode>
+  >();
   private disposed = false;
 
   public constructor(
@@ -84,9 +93,44 @@ export class PostgresSessionRegistry {
       }
     });
 
-    let state: "pending" | "executing" | "released" = "pending";
+    let state: "pending" | "executing" | "released" | "cancelled" =
+      "pending";
+    let finished = false;
+    let node!: PendingReservationNode;
+    const finish = () => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      complete();
+      const pending = this.pendingReservations.get(documentUri);
+      pending?.delete(node);
+      if (pending?.size === 0) {
+        this.pendingReservations.delete(documentUri);
+      }
+    };
+    node = {
+      generation: invocationGeneration,
+      cancel: () => {
+        if (state === "pending" || state === "executing") {
+          state = "cancelled";
+          finish();
+        }
+      },
+    };
+    const pending =
+      this.pendingReservations.get(documentUri) ??
+      new Set<PendingReservationNode>();
+    pending.add(node);
+    this.pendingReservations.set(documentUri, pending);
+
     return {
       execute: (connectionName, config, readPassword, sql) => {
+        if (state === "cancelled") {
+          return Promise.reject(
+            new Error("PostgreSQL run was cancelled because the session reset"),
+          );
+        }
         if (state !== "pending") {
           return Promise.reject(
             new Error("PostgreSQL run reservation is no longer available"),
@@ -103,13 +147,13 @@ export class PostgresSessionRegistry {
             invocationGeneration,
           ),
         );
-        void execution.then(complete, complete);
+        void execution.then(finish, finish);
         return execution;
       },
       release: () => {
         if (state === "pending") {
           state = "released";
-          complete();
+          finish();
         }
       },
     };
@@ -141,6 +185,7 @@ export class PostgresSessionRegistry {
         text: sql,
         rowMode: "array",
       })) as QueryResult<unknown[]> | QueryResult<unknown[]>[];
+      this.assertGeneration(documentUri, invocationGeneration);
       return normalizePostgresResult(response);
     } finally {
       entry.queryInFlight = false;
@@ -293,6 +338,7 @@ export class PostgresSessionRegistry {
       connectionTimeoutMillis: this.timeouts.terminateConnectMs,
       query_timeout: this.timeouts.terminateQueryMs,
     });
+    terminator.on("error", () => undefined);
     try {
       await withTimeout(
         terminator.connect(),
@@ -395,7 +441,15 @@ export class PostgresSessionRegistry {
   }
 
   private incrementGeneration(documentUri: string): void {
-    this.generations.set(documentUri, this.getGeneration(documentUri) + 1);
+    const generation = this.getGeneration(documentUri) + 1;
+    this.generations.set(documentUri, generation);
+    for (const node of [
+      ...(this.pendingReservations.get(documentUri) ?? []),
+    ]) {
+      if (node.generation < generation) {
+        node.cancel();
+      }
+    }
   }
 }
 

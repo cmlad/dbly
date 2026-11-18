@@ -284,12 +284,12 @@ async function resolveConnection(
   }
 
   const config = await loadConfig();
-  const connection = config.connections[connectionName];
-  if (connection === undefined) {
+  if (!Object.hasOwn(config.connections, connectionName)) {
     throw new Error(
       `dbly: Connection "${connectionName}" is not configured. Run dbly: Select Connection.`,
     );
   }
+  const connection = config.connections[connectionName];
   return { connectionName, connection };
 }
 
