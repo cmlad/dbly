@@ -45,7 +45,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "build": "npm run check && node esbuild.mjs",
-    "test": "tsx --test src/statement.test.ts src/connectionComment.test.ts src/csv.test.ts src/bigqueryValues.test.ts",
+    "test": "tsx --test src/statement.test.ts src/connectionComment.test.ts src/csv.test.ts src/bigqueryValues.test.ts src/postgresSessions.test.ts",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {

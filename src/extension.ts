@@ -199,7 +199,6 @@ async function runCurrentStatement(
   if (panel === undefined) {
     return;
   }
-  const runId = panel.beginRun();
   const editor = activeSqlEditor();
   if (editor === undefined) {
     return;
@@ -225,6 +224,11 @@ async function runCurrentStatement(
     editor.document,
   );
   const documentUri = editor.document.uri.toString();
+  const password =
+    connection.type === "postgres"
+      ? await context.secrets.get(postgresPasswordKey(connectionName))
+      : undefined;
+  const runId = panel.beginRun();
   const started = performance.now();
   panel.showRunning(runId, connectionName);
 
@@ -235,7 +239,7 @@ async function runCurrentStatement(
             documentUri,
             connectionName,
             connection,
-            await context.secrets.get(postgresPasswordKey(connectionName)),
+            password,
             sql,
           )
         : await new BigQueryExecutor(connection).execute(sql);

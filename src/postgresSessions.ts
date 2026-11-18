@@ -15,7 +15,8 @@ interface PostgresSessionEntry {
   intentionalClose: boolean;
   ready: boolean;
   lostNotified: boolean;
-  closing: Promise<void> | undefined;
+  cleanup: Promise<void> | undefined;
+  terminateWarning: string | undefined;
 }
 
 export interface ReconnectResult {
@@ -29,13 +30,31 @@ type SessionLostHandler = (
   message: string,
 ) => void;
 
+interface SessionTimeouts {
+  terminateConnectMs: number;
+  terminateQueryMs: number;
+  clientEndMs: number;
+}
+
+type ClientFactory = (config: ClientConfig) => Client;
+
+const DEFAULT_TIMEOUTS: SessionTimeouts = {
+  terminateConnectMs: 5_000,
+  terminateQueryMs: 5_000,
+  clientEndMs: 2_000,
+};
+
 export class PostgresSessionRegistry {
   private readonly entries = new Map<string, PostgresSessionEntry>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly generations = new Map<string, number>();
   private disposed = false;
 
-  public constructor(private readonly onSessionLost: SessionLostHandler) {}
+  public constructor(
+    private readonly onSessionLost: SessionLostHandler,
+    private readonly createClient: ClientFactory = (config) => new Client(config),
+    private readonly timeouts: SessionTimeouts = DEFAULT_TIMEOUTS,
+  ) {}
 
   public execute(
     documentUri: string,
@@ -93,34 +112,21 @@ export class PostgresSessionRegistry {
       return { hadSession: false };
     }
 
-    this.entries.delete(documentUri);
-    entry.intentionalClose = true;
-    let terminateWarning: string | undefined;
-    if (entry.queryInFlight) {
-      try {
-        await this.terminateBackend(entry);
-      } catch (error) {
-        terminateWarning = error instanceof Error ? error.message : String(error);
-      }
-    }
-    await this.closeEntry(entry);
-
+    await this.resetEntry(entry, true);
     return {
       hadSession: true,
-      ...(terminateWarning === undefined ? {} : { terminateWarning }),
+      ...(entry.terminateWarning === undefined
+        ? {}
+        : { terminateWarning: entry.terminateWarning }),
     };
   }
 
   public async closeDocument(documentUri: string): Promise<void> {
     this.incrementGeneration(documentUri);
     const entry = this.entries.get(documentUri);
-    if (entry === undefined) {
-      return;
+    if (entry !== undefined) {
+      await this.resetEntry(entry, false);
     }
-
-    this.entries.delete(documentUri);
-    entry.intentionalClose = true;
-    await this.closeEntry(entry);
   }
 
   public async closeByConnection(connectionName: string): Promise<number> {
@@ -129,12 +135,10 @@ export class PostgresSessionRegistry {
     );
     for (const entry of matching) {
       this.incrementGeneration(entry.documentUri);
-      if (this.entries.get(entry.documentUri) === entry) {
-        this.entries.delete(entry.documentUri);
-      }
-      entry.intentionalClose = true;
     }
-    await Promise.all(matching.map((entry) => this.closeEntry(entry)));
+    await Promise.all(
+      matching.map((entry) => this.resetEntry(entry, false)),
+    );
     return matching.length;
   }
 
@@ -148,11 +152,9 @@ export class PostgresSessionRegistry {
     }
 
     const entries = [...this.entries.values()];
-    this.entries.clear();
-    for (const entry of entries) {
-      entry.intentionalClose = true;
-    }
-    await Promise.all(entries.map((entry) => this.closeEntry(entry)));
+    await Promise.all(
+      entries.map((entry) => this.resetEntry(entry, false)),
+    );
   }
 
   private async getOrCreateSession(
@@ -166,6 +168,8 @@ export class PostgresSessionRegistry {
     const existing = this.entries.get(documentUri);
     if (
       existing !== undefined &&
+      existing.generation === generation &&
+      existing.cleanup === undefined &&
       existing.connectionName === connectionName &&
       existing.configFingerprint === configFingerprint &&
       existing.password === password
@@ -174,9 +178,7 @@ export class PostgresSessionRegistry {
     }
 
     if (existing !== undefined) {
-      this.entries.delete(documentUri);
-      existing.intentionalClose = true;
-      await this.closeEntry(existing);
+      await this.resetEntry(existing, false);
       this.assertGeneration(documentUri, generation);
     }
 
@@ -187,7 +189,7 @@ export class PostgresSessionRegistry {
       database: config.database,
       ...(password === undefined ? {} : { password }),
     };
-    const client = new Client(clientConfig);
+    const client = this.createClient(clientConfig);
     const entry: PostgresSessionEntry = {
       documentUri,
       connectionName,
@@ -201,7 +203,8 @@ export class PostgresSessionRegistry {
       intentionalClose: false,
       ready: false,
       lostNotified: false,
-      closing: undefined,
+      cleanup: undefined,
+      terminateWarning: undefined,
     };
 
     client.on("error", (error: Error) => {
@@ -229,11 +232,8 @@ export class PostgresSessionRegistry {
       entry.ready = true;
       return entry;
     } catch (error) {
-      if (this.entries.get(documentUri) === entry) {
-        this.entries.delete(documentUri);
-      }
       entry.intentionalClose = true;
-      await this.closeEntry(entry);
+      await this.resetEntry(entry, false);
       if (this.getGeneration(documentUri) !== generation) {
         throw new Error("PostgreSQL run was cancelled because the session reset");
       }
@@ -246,22 +246,32 @@ export class PostgresSessionRegistry {
       throw new Error("the PostgreSQL backend PID was unavailable");
     }
 
-    const terminator = new Client(entry.clientConfig);
+    const terminator = this.createClient({
+      ...entry.clientConfig,
+      connectionTimeoutMillis: this.timeouts.terminateConnectMs,
+      query_timeout: this.timeouts.terminateQueryMs,
+    });
     try {
-      await terminator.connect();
-      const result = await terminator.query<{ terminated: boolean }>({
-        text: "SELECT pg_terminate_backend($1) AS terminated",
-        values: [entry.backendPid],
-      });
+      await withTimeout(
+        terminator.connect(),
+        this.timeouts.terminateConnectMs,
+        "timed out connecting to terminate the PostgreSQL backend",
+        () => destroyClient(terminator),
+      );
+      const result = await withTimeout(
+        terminator.query<{ terminated: boolean }>({
+          text: "SELECT pg_terminate_backend($1) AS terminated",
+          values: [entry.backendPid],
+        }),
+        this.timeouts.terminateQueryMs,
+        "timed out terminating the PostgreSQL backend",
+        () => destroyClient(terminator),
+      );
       if (result.rows[0]?.terminated !== true) {
         throw new Error("PostgreSQL did not confirm backend termination");
       }
     } finally {
-      try {
-        await terminator.end();
-      } catch {
-        // The termination result is more useful than an error while closing it.
-      }
+      await this.endClient(terminator);
     }
   }
 
@@ -284,18 +294,45 @@ export class PostgresSessionRegistry {
       this.onSessionLost(entry.documentUri, entry.connectionName, message);
     }
     entry.intentionalClose = true;
-    void this.closeEntry(entry);
+    void this.resetEntry(entry, false);
   }
 
-  private async closeEntry(entry: PostgresSessionEntry): Promise<void> {
-    entry.closing ??= (async () => {
+  private async resetEntry(
+    entry: PostgresSessionEntry,
+    terminateInFlight: boolean,
+  ): Promise<void> {
+    entry.intentionalClose = true;
+    entry.cleanup ??= (async () => {
       try {
-        await entry.client.end();
-      } catch {
-        // Cleanup is best effort; the registry has already invalidated the entry.
+        if (terminateInFlight && entry.queryInFlight) {
+          try {
+            await this.terminateBackend(entry);
+          } catch (error) {
+            entry.terminateWarning =
+              error instanceof Error ? error.message : String(error);
+          }
+        }
+      } finally {
+        await this.endClient(entry.client);
+        if (this.entries.get(entry.documentUri) === entry) {
+          this.entries.delete(entry.documentUri);
+        }
       }
     })();
-    await entry.closing;
+    await entry.cleanup;
+  }
+
+  private async endClient(client: Client): Promise<void> {
+    try {
+      await withTimeout(
+        Promise.resolve().then(() => client.end()),
+        this.timeouts.clientEndMs,
+        "timed out closing a PostgreSQL client",
+        () => destroyClient(client),
+      );
+    } catch {
+      destroyClient(client);
+    }
   }
 
   private assertCurrentEntry(entry: PostgresSessionEntry): void {
@@ -333,4 +370,44 @@ function normalizePostgresResult(
     rows: finalResult.rows.map((row) => row.map(normalizeCell)),
     rowCount: String(finalResult.rowCount ?? finalResult.rows.length),
   };
+}
+
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      try {
+        onTimeout();
+      } finally {
+        reject(new Error(message));
+      }
+    }, timeoutMs);
+    timeout.unref();
+
+    operation.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
+function destroyClient(client: Client): void {
+  const internalClient = client as unknown as {
+    connection?: { stream?: { destroy: () => void } };
+  };
+  try {
+    internalClient.connection?.stream?.destroy();
+  } catch {
+    // The client is already unusable; cleanup remains best effort.
+  }
 }

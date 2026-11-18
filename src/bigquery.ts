@@ -86,7 +86,9 @@ export class BigQueryExecutor {
 
     while (true) {
       const [rows, nextQuery, apiResponse] = await job.getQueryResults(request);
-      allRows.push(...(rows as Record<string, unknown>[]));
+      for (const row of rows as Record<string, unknown>[]) {
+        allRows.push(row);
+      }
 
       const response = apiResponse as {
         jobComplete?: boolean | null;
