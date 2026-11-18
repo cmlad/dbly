@@ -47,9 +47,7 @@ export function activate(context: vscode.ExtensionContext): void {
       protectCommand(() => runCurrentStatement(context)),
     ),
     vscode.workspace.onDidCloseTextDocument((document) => {
-      if (document.languageId === "sql") {
-        void postgresSessions?.closeDocument(document.uri.toString());
-      }
+      void postgresSessions?.closeDocument(document.uri.toString());
     }),
   );
 }
