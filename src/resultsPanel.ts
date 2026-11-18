@@ -26,16 +26,23 @@ type PanelState = RunRunning | RunSuccess | RunFailure;
 export class ResultsPanel implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
   private panelDisposables: vscode.Disposable[] = [];
+  private nextRunId = 0;
   private currentRunId = 0;
   private currentState: PanelState | undefined;
   private exportResult: DriverResult | undefined;
   private webviewReady = false;
   private disposed = false;
 
-  public beginRun(): number {
-    this.currentRunId += 1;
-    this.exportResult = undefined;
-    return this.currentRunId;
+  public reserveRun(): number {
+    this.nextRunId += 1;
+    return this.nextRunId;
+  }
+
+  public beginRun(runId: number): void {
+    if (runId > this.currentRunId) {
+      this.currentRunId = runId;
+      this.exportResult = undefined;
+    }
   }
 
   public showRunning(runId: number, connectionName: string): void {

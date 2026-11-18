@@ -162,6 +162,21 @@ async function reconnectActiveDocument(): Promise<void> {
     return;
   }
 
+  const documentUri = editor.document.uri.toString();
+  const outcome = await postgresSessions?.reconnect(documentUri);
+  if (outcome?.hadSession) {
+    if (outcome.terminateWarning !== undefined) {
+      await vscode.window.showWarningMessage(
+        `dbly: Reset the local session, but could not confirm server backend termination (${outcome.terminateWarning}). The backend may still be executing, holding locks, or able to commit.`,
+      );
+      return;
+    }
+    await vscode.window.showInformationMessage(
+      "dbly: PostgreSQL session closed; any open transaction was rolled back. The next run will reconnect.",
+    );
+    return;
+  }
+
   const { connectionName, connection } = await resolveConnection(
     editor.document,
   );
@@ -171,25 +186,10 @@ async function reconnectActiveDocument(): Promise<void> {
     );
     return;
   }
-
-  const outcome = await postgresSessions?.reconnect(
-    editor.document.uri.toString(),
-  );
-  if (outcome === undefined || !outcome.hadSession) {
-    await vscode.window.showInformationMessage(
-      `dbly: No PostgreSQL session exists for "${connectionName}" in this document.`,
-    );
-    return;
-  }
-  if (outcome.terminateWarning !== undefined) {
-    await vscode.window.showWarningMessage(
-      `dbly: Reset the local session, but could not confirm server backend termination (${outcome.terminateWarning}). The backend may still be executing, holding locks, or able to commit.`,
-    );
-    return;
-  }
   await vscode.window.showInformationMessage(
-    "dbly: PostgreSQL session closed; any open transaction was rolled back. The next run will reconnect.",
+    `dbly: No PostgreSQL session exists for "${connectionName}" in this document.`,
   );
+  return;
 }
 
 async function runCurrentStatement(
@@ -219,24 +219,34 @@ async function runCurrentStatement(
     );
     return;
   }
+  const runId = panel.reserveRun();
 
-  const { connectionName, connection } = await resolveConnection(
-    editor.document,
-  );
   const documentUri = editor.document.uri.toString();
-  const password =
-    connection.type === "postgres"
-      ? await context.secrets.get(postgresPasswordKey(connectionName))
-      : undefined;
-  const runId = panel.beginRun();
+  const reservation = postgresSessions!.reserve(documentUri);
+  let connectionName: string;
+  let connection: ConnectionConfig;
+  let password: string | undefined;
+  try {
+    ({ connectionName, connection } = await resolveConnection(editor.document));
+    password =
+      connection.type === "postgres"
+        ? await context.secrets.get(postgresPasswordKey(connectionName))
+        : undefined;
+  } catch (error) {
+    reservation.release();
+    throw error;
+  }
+  if (connection.type === "bigquery") {
+    reservation.release();
+  }
+  panel.beginRun(runId);
   const started = performance.now();
   panel.showRunning(runId, connectionName);
 
   try {
     const result =
       connection.type === "postgres"
-        ? await postgresSessions!.execute(
-            documentUri,
+        ? await reservation.execute(
             connectionName,
             connection,
             password,
@@ -259,6 +269,8 @@ async function runCurrentStatement(
           ? postgresQueryErrorMessage(error)
           : errorMessage(error),
     });
+  } finally {
+    reservation.release();
   }
 }
 

@@ -73,21 +73,24 @@ test("reuses one client and serializes runs for a document", async () => {
     },
   );
 
-  const firstRun = registry.execute(
-    "file:///query.sql",
+  const firstReservation = registry.reserve("file:///query.sql");
+  const secondReservation = registry.reserve("file:///query.sql");
+  const secondRun = secondReservation.execute(
+    "local",
+    CONNECTION,
+    undefined,
+    "SELECT second",
+  );
+  await waitForImmediate();
+  assert.equal(clientsCreated, 0);
+
+  const firstRun = firstReservation.execute(
     "local",
     CONNECTION,
     undefined,
     "SELECT first",
   );
   await firstStarted.promise;
-  const secondRun = registry.execute(
-    "file:///query.sql",
-    "local",
-    CONNECTION,
-    undefined,
-    "SELECT second",
-  );
   await waitForImmediate();
   assert.deepEqual(
     session.queryTexts.filter((text) => !text.startsWith("SELECT set_config")),
@@ -148,22 +151,14 @@ test("bounds reconnect termination, retains cleanup, and cancels queued runs", a
     { terminateConnectMs: 20, terminateQueryMs: 20, clientEndMs: 20 },
   );
 
-  const activeRun = registry.execute(
-    "file:///slow.sql",
-    "local",
-    CONNECTION,
-    undefined,
-    "SELECT slow",
-  );
+  const activeRun = registry
+    .reserve("file:///slow.sql")
+    .execute("local", CONNECTION, undefined, "SELECT slow");
   await queryStarted.promise;
   const activeFailure = assert.rejects(activeRun, /session closed/);
-  const queuedRun = registry.execute(
-    "file:///slow.sql",
-    "local",
-    CONNECTION,
-    undefined,
-    "SELECT queued",
-  );
+  const queuedRun = registry
+    .reserve("file:///slow.sql")
+    .execute("local", CONNECTION, undefined, "SELECT queued");
   const queuedFailure = assert.rejects(queuedRun, /session reset/);
 
   const reconnect = registry.reconnect("file:///slow.sql");
@@ -177,6 +172,14 @@ test("bounds reconnect termination, retains cleanup, and cancels queued runs", a
   assert.match(outcome.terminateWarning ?? "", /timed out terminating/);
   assert.equal(terminator.destroyed, true);
   assert.equal(session.endCalls, 1);
+
+  const preflight = registry.reserve("file:///preflight.sql");
+  const noSession = await registry.reconnect("file:///preflight.sql");
+  assert.equal(noSession.hadSession, false);
+  await assert.rejects(
+    preflight.execute("local", CONNECTION, undefined, "SELECT late"),
+    /session reset/,
+  );
 });
 
 function queryResult(value: string): unknown {

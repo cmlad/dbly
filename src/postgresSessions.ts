@@ -44,6 +44,16 @@ const DEFAULT_TIMEOUTS: SessionTimeouts = {
   clientEndMs: 2_000,
 };
 
+export interface PostgresRunReservation {
+  execute(
+    connectionName: string,
+    config: PostgresConnectionConfig,
+    password: string | undefined,
+    sql: string,
+  ): Promise<DriverResult>;
+  release(): void;
+}
+
 export class PostgresSessionRegistry {
   private readonly entries = new Map<string, PostgresSessionEntry>();
   private readonly queues = new Map<string, Promise<void>>();
@@ -56,53 +66,83 @@ export class PostgresSessionRegistry {
     private readonly timeouts: SessionTimeouts = DEFAULT_TIMEOUTS,
   ) {}
 
-  public execute(
+  public reserve(documentUri: string): PostgresRunReservation {
+    const invocationGeneration = this.getGeneration(documentUri);
+    const prior = this.queues.get(documentUri) ?? Promise.resolve();
+    let complete!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const tail = prior.then(
+      () => completion,
+      () => completion,
+    );
+    this.queues.set(documentUri, tail);
+    void tail.then(() => {
+      if (this.queues.get(documentUri) === tail) {
+        this.queues.delete(documentUri);
+      }
+    });
+
+    let state: "pending" | "executing" | "released" = "pending";
+    return {
+      execute: (connectionName, config, password, sql) => {
+        if (state !== "pending") {
+          return Promise.reject(
+            new Error("PostgreSQL run reservation is no longer available"),
+          );
+        }
+        state = "executing";
+        const execution = prior.then(() =>
+          this.executeReserved(
+            documentUri,
+            connectionName,
+            config,
+            password,
+            sql,
+            invocationGeneration,
+          ),
+        );
+        void execution.then(complete, complete);
+        return execution;
+      },
+      release: () => {
+        if (state === "pending") {
+          state = "released";
+          complete();
+        }
+      },
+    };
+  }
+
+  private async executeReserved(
     documentUri: string,
     connectionName: string,
     config: PostgresConnectionConfig,
     password: string | undefined,
     sql: string,
+    invocationGeneration: number,
   ): Promise<DriverResult> {
-    if (this.disposed) {
-      return Promise.reject(new Error("PostgreSQL sessions have been disposed"));
-    }
-
-    const invocationGeneration = this.getGeneration(documentUri);
-    const prior = this.queues.get(documentUri) ?? Promise.resolve();
-    const execution = prior.then(async () => {
-      this.assertGeneration(documentUri, invocationGeneration);
-      const entry = await this.getOrCreateSession(
-        documentUri,
-        connectionName,
-        config,
-        password,
-        invocationGeneration,
-      );
-      this.assertGeneration(documentUri, invocationGeneration);
-
-      entry.queryInFlight = true;
-      try {
-        const response = (await entry.client.query({
-          text: sql,
-          rowMode: "array",
-        })) as QueryResult<unknown[]> | QueryResult<unknown[]>[];
-        return normalizePostgresResult(response);
-      } finally {
-        entry.queryInFlight = false;
-      }
-    });
-
-    const tail = execution.then(
-      () => undefined,
-      () => undefined,
+    this.assertGeneration(documentUri, invocationGeneration);
+    const entry = await this.getOrCreateSession(
+      documentUri,
+      connectionName,
+      config,
+      password,
+      invocationGeneration,
     );
-    this.queues.set(documentUri, tail);
-    void tail.finally(() => {
-      if (this.queues.get(documentUri) === tail) {
-        this.queues.delete(documentUri);
-      }
-    });
-    return execution;
+    this.assertGeneration(documentUri, invocationGeneration);
+
+    entry.queryInFlight = true;
+    try {
+      const response = (await entry.client.query({
+        text: sql,
+        rowMode: "array",
+      })) as QueryResult<unknown[]> | QueryResult<unknown[]>[];
+      return normalizePostgresResult(response);
+    } finally {
+      entry.queryInFlight = false;
+    }
   }
 
   public async reconnect(documentUri: string): Promise<ReconnectResult> {
