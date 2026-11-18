@@ -76,7 +76,7 @@ On a new session, dbly connects to the configured database and applies the confi
 
 Closing a SQL document closes its session and rolls back any open transaction. An unexpected connection loss also loses transaction state; dbly warns, and the next explicit run reconnects. Each used/open SQL document consumes one PostgreSQL connection until one of these cleanup events.
 
-**dbly: Reconnect** invalidates the document session immediately. For an idle session, dbly closes it, which rolls back any open transaction. If a query is running, dbly opens a short-lived second connection and calls `pg_terminate_backend` for the document's backend before dropping the local client. If termination cannot be confirmed, dbly still resets locally and warns that the server query may continue, retain locks, or commit. The next explicit run creates a fresh session. Reconnect does not track or display transaction status.
+**dbly: Reconnect** invalidates the document session immediately. For an idle session, dbly closes it, which rolls back any open transaction. If a query is running, dbly opens a short-lived second connection and calls `pg_terminate_backend` for the document's backend before dropping the local client. Even confirmed termination cannot prove that the statement did not finish first, so dbly warns you to check its effects before retrying. If termination cannot be confirmed, dbly still resets locally and warns that the server query may continue, retain locks, or commit. The next explicit run creates a fresh session. Reconnect does not track or display transaction status.
 
 ## Development
 

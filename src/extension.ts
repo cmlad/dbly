@@ -47,7 +47,9 @@ export function activate(context: vscode.ExtensionContext): void {
       protectCommand(() => runCurrentStatement(context)),
     ),
     vscode.workspace.onDidCloseTextDocument((document) => {
-      void postgresSessions?.closeDocument(document.uri.toString());
+      if (document.languageId === "sql") {
+        void postgresSessions?.closeDocument(document.uri.toString());
+      }
     }),
   );
 }
@@ -168,6 +170,12 @@ async function reconnectActiveDocument(): Promise<void> {
     if (outcome.terminateWarning !== undefined) {
       await vscode.window.showWarningMessage(
         `dbly: Reset the local session, but could not confirm server backend termination (${outcome.terminateWarning}). The backend may still be executing, holding locks, or able to commit.`,
+      );
+      return;
+    }
+    if (outcome.queryMayHaveCompleted) {
+      await vscode.window.showWarningMessage(
+        "dbly: PostgreSQL session reset, but the in-flight statement may have completed before backend termination. Check its effects before retrying; any transaction still open at termination was rolled back.",
       );
       return;
     }

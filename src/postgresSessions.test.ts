@@ -20,6 +20,8 @@ class FakeClient {
   public endCalls = 0;
   public destroyed = false;
   public errorListenerCount = 0;
+  private readonly errorListeners: Array<(error: Error) => void> = [];
+  private readonly endListeners: Array<() => void> = [];
 
   public constructor(
     private readonly queryHandler: (text: string) => Promise<unknown>,
@@ -50,11 +52,26 @@ class FakeClient {
     this.onClose();
   }
 
-  public on(event: string): this {
+  public on(event: string, listener: (...arguments_: unknown[]) => void): this {
     if (event === "error") {
       this.errorListenerCount += 1;
+      this.errorListeners.push((error) => listener(error));
+    } else if (event === "end") {
+      this.endListeners.push(() => listener());
     }
     return this;
+  }
+
+  public emitError(error: Error): void {
+    for (const listener of this.errorListeners) {
+      listener(error);
+    }
+  }
+
+  public emitEnd(): void {
+    for (const listener of this.endListeners) {
+      listener();
+    }
   }
 }
 
@@ -226,38 +243,99 @@ test("document cutover releases queued PostgreSQL state", { timeout: 2_000 }, as
   );
 });
 
-test("reads a queued run password only when its turn starts", async () => {
-  const session = new FakeClient((sql) => Promise.resolve(queryResult(sql)));
-  let clientPassword: ClientConfig["password"];
+test("fulfilled query remains successful when reconnect races", async () => {
+  const queryStarted = deferred<void>();
+  const queryCompletion = deferred<unknown>();
+  const session = new FakeClient((sql) => {
+    assert.equal(sql, "COMMIT");
+    queryStarted.resolve();
+    return queryCompletion.promise;
+  });
+  const terminator = new FakeClient((sql) => {
+    assert.equal(sql, "SELECT pg_terminate_backend($1) AS terminated");
+    queryCompletion.resolve(queryResult("committed"));
+    return Promise.resolve({ rows: [{ terminated: true }] });
+  });
+  const clients = [session, terminator];
   const registry = new PostgresSessionRegistry(
     () => undefined,
-    (config) => {
-      clientPassword = config.password;
-      return session as unknown as Client;
-    },
+    () => clients.shift() as unknown as Client,
   );
-  const blocker = registry.reserve("file:///password.sql");
-  const queued = registry.reserve("file:///password.sql");
-  let currentPassword = "old";
-  let passwordReads = 0;
-  const run = queued.execute(
-    "local",
-    CONNECTION,
-    async () => {
-      passwordReads += 1;
-      return currentPassword;
-    },
-    "SELECT 1",
-  );
-  await waitForImmediate();
-  assert.equal(passwordReads, 0);
 
-  currentPassword = "new";
-  blocker.release();
-  await run;
-  assert.equal(passwordReads, 1);
-  assert.equal(clientPassword, "new");
-  await registry.disposeAll();
+  const run = registry
+    .reserve("file:///commit.sql")
+    .execute("local", CONNECTION, async () => undefined, "COMMIT");
+  await queryStarted.promise;
+  const [result, reconnect] = await Promise.all([
+    run,
+    registry.reconnect("file:///commit.sql"),
+  ]);
+  assert.equal(result.rowCount, "1");
+  assert.equal(reconnect.queryMayHaveCompleted, true);
+  assert.equal(reconnect.terminateWarning, undefined);
+});
+
+test("password rotation cancels a deferred password read", async () => {
+  const passwordStarted = deferred<void>();
+  const password = deferred<string | undefined>();
+  let clientsCreated = 0;
+  const registry = new PostgresSessionRegistry(
+    () => undefined,
+    () => {
+      clientsCreated += 1;
+      return new FakeClient((sql) =>
+        Promise.resolve(queryResult(sql)),
+      ) as unknown as Client;
+    },
+  );
+  const run = registry
+    .reserve("file:///password.sql")
+    .execute(
+      "local",
+      CONNECTION,
+      async () => {
+        passwordStarted.resolve();
+        return password.promise;
+      },
+      "SELECT 1",
+    );
+  await passwordStarted.promise;
+  const runFailure = assert.rejects(run, /session reset/);
+  assert.equal(await registry.closeByConnection("local"), 0);
+  password.resolve("old-password");
+  await runFailure;
+  assert.equal(clientsCreated, 0);
+});
+
+test("unexpected loss invalidates queued work and reconnects next run", async () => {
+  const first = new FakeClient((sql) => Promise.resolve(queryResult(sql)));
+  const second = new FakeClient((sql) => Promise.resolve(queryResult(sql)));
+  const clients = [first, second];
+  const losses: string[] = [];
+  const registry = new PostgresSessionRegistry(
+    (_documentUri, _connectionName, message) => losses.push(message),
+    () => clients.shift() as unknown as Client,
+  );
+  await registry
+    .reserve("file:///loss.sql")
+    .execute("local", CONNECTION, async () => undefined, "SELECT first");
+  const queued = registry.reserve("file:///loss.sql");
+
+  first.emitError(new Error("socket lost"));
+  await assert.rejects(
+    queued.execute(
+      "local",
+      CONNECTION,
+      async () => undefined,
+      "SELECT stale",
+    ),
+    /session reset/,
+  );
+  await registry
+    .reserve("file:///loss.sql")
+    .execute("local", CONNECTION, async () => undefined, "SELECT next");
+  assert.deepEqual(losses, ["socket lost"]);
+  assert.equal(clients.length, 0);
 });
 
 function queryResult(value: string): unknown {

@@ -22,6 +22,7 @@ interface PostgresSessionEntry {
 export interface ReconnectResult {
   hadSession: boolean;
   terminateWarning?: string;
+  queryMayHaveCompleted?: boolean;
 }
 
 type SessionLostHandler = (
@@ -46,6 +47,8 @@ const DEFAULT_TIMEOUTS: SessionTimeouts = {
 
 interface PendingReservationNode {
   generation: number;
+  connectionName: string | undefined;
+  cancelled: boolean;
   cancel(): void;
 }
 
@@ -91,6 +94,7 @@ export class PostgresSessionRegistry {
       if (this.queues.get(documentUri) === tail) {
         this.queues.delete(documentUri);
       }
+      this.maybeEvictDocument(documentUri);
     });
 
     let state: "pending" | "executing" | "released" | "cancelled" =
@@ -108,11 +112,15 @@ export class PostgresSessionRegistry {
       if (pending?.size === 0) {
         this.pendingReservations.delete(documentUri);
       }
+      this.maybeEvictDocument(documentUri);
     };
     node = {
       generation: invocationGeneration,
+      connectionName: undefined,
+      cancelled: false,
       cancel: () => {
         if (state === "pending" || state === "executing") {
+          node.cancelled = true;
           state = "cancelled";
           finish();
         }
@@ -137,6 +145,7 @@ export class PostgresSessionRegistry {
           );
         }
         state = "executing";
+        node.connectionName = connectionName;
         const execution = prior.then(() =>
           this.executeReserved(
             documentUri,
@@ -145,6 +154,7 @@ export class PostgresSessionRegistry {
             readPassword,
             sql,
             invocationGeneration,
+            node,
           ),
         );
         void execution.then(finish, finish);
@@ -166,18 +176,20 @@ export class PostgresSessionRegistry {
     readPassword: () => PromiseLike<string | undefined>,
     sql: string,
     invocationGeneration: number,
+    reservation: PendingReservationNode,
   ): Promise<DriverResult> {
-    this.assertGeneration(documentUri, invocationGeneration);
+    this.assertReservation(documentUri, invocationGeneration, reservation);
     const password = await readPassword();
-    this.assertGeneration(documentUri, invocationGeneration);
+    this.assertReservation(documentUri, invocationGeneration, reservation);
     const entry = await this.getOrCreateSession(
       documentUri,
       connectionName,
       config,
       password,
       invocationGeneration,
+      reservation,
     );
-    this.assertGeneration(documentUri, invocationGeneration);
+    this.assertReservation(documentUri, invocationGeneration, reservation);
 
     entry.queryInFlight = true;
     try {
@@ -185,7 +197,6 @@ export class PostgresSessionRegistry {
         text: sql,
         rowMode: "array",
       })) as QueryResult<unknown[]> | QueryResult<unknown[]>[];
-      this.assertGeneration(documentUri, invocationGeneration);
       return normalizePostgresResult(response);
     } finally {
       entry.queryInFlight = false;
@@ -193,15 +204,21 @@ export class PostgresSessionRegistry {
   }
 
   public async reconnect(documentUri: string): Promise<ReconnectResult> {
+    if (!this.hasDocumentActivity(documentUri)) {
+      return { hadSession: false };
+    }
     this.incrementGeneration(documentUri);
     const entry = this.entries.get(documentUri);
     if (entry === undefined) {
+      this.maybeEvictDocument(documentUri);
       return { hadSession: false };
     }
 
+    const queryMayHaveCompleted = entry.queryInFlight;
     await this.resetEntry(entry, true);
     return {
       hadSession: true,
+      ...(queryMayHaveCompleted ? { queryMayHaveCompleted: true } : {}),
       ...(entry.terminateWarning === undefined
         ? {}
         : { terminateWarning: entry.terminateWarning }),
@@ -209,19 +226,37 @@ export class PostgresSessionRegistry {
   }
 
   public async closeDocument(documentUri: string): Promise<void> {
+    if (!this.hasDocumentActivity(documentUri)) {
+      return;
+    }
     this.incrementGeneration(documentUri);
     const entry = this.entries.get(documentUri);
     if (entry !== undefined) {
       await this.resetEntry(entry, false);
     }
+    this.maybeEvictDocument(documentUri);
   }
 
   public async closeByConnection(connectionName: string): Promise<number> {
     const matching = [...this.entries.values()].filter(
       (entry) => entry.connectionName === connectionName,
     );
+    const matchingDocuments = new Set(
+      matching.map((entry) => entry.documentUri),
+    );
     for (const entry of matching) {
       this.incrementGeneration(entry.documentUri);
+    }
+    for (const [documentUri, reservations] of this.pendingReservations) {
+      if (matchingDocuments.has(documentUri)) {
+        continue;
+      }
+      for (const reservation of [...reservations]) {
+        if (reservation.connectionName === connectionName) {
+          reservation.cancel();
+        }
+      }
+      this.maybeEvictDocument(documentUri);
     }
     await Promise.all(
       matching.map((entry) => this.resetEntry(entry, false)),
@@ -250,6 +285,7 @@ export class PostgresSessionRegistry {
     config: PostgresConnectionConfig,
     password: string | undefined,
     generation: number,
+    reservation: PendingReservationNode,
   ): Promise<PostgresSessionEntry> {
     const configFingerprint = JSON.stringify(config);
     const existing = this.entries.get(documentUri);
@@ -266,7 +302,7 @@ export class PostgresSessionRegistry {
 
     if (existing !== undefined) {
       await this.resetEntry(existing, false);
-      this.assertGeneration(documentUri, generation);
+      this.assertReservation(documentUri, generation, reservation);
     }
 
     const clientConfig: ClientConfig = {
@@ -405,6 +441,7 @@ export class PostgresSessionRegistry {
         if (this.entries.get(entry.documentUri) === entry) {
           this.entries.delete(entry.documentUri);
         }
+        this.maybeEvictDocument(entry.documentUri);
       }
     })();
     await entry.cleanup;
@@ -423,6 +460,17 @@ export class PostgresSessionRegistry {
     }
   }
 
+  private assertReservation(
+    documentUri: string,
+    generation: number,
+    reservation: PendingReservationNode,
+  ): void {
+    if (reservation.cancelled) {
+      throw new Error("PostgreSQL run was cancelled because the session reset");
+    }
+    this.assertGeneration(documentUri, generation);
+  }
+
   private assertCurrentEntry(entry: PostgresSessionEntry): void {
     this.assertGeneration(entry.documentUri, entry.generation);
     if (this.entries.get(entry.documentUri) !== entry) {
@@ -433,6 +481,21 @@ export class PostgresSessionRegistry {
   private assertGeneration(documentUri: string, generation: number): void {
     if (this.disposed || this.getGeneration(documentUri) !== generation) {
       throw new Error("PostgreSQL run was cancelled because the session reset");
+    }
+  }
+
+  private hasDocumentActivity(documentUri: string): boolean {
+    return (
+      this.entries.has(documentUri) ||
+      this.queues.has(documentUri) ||
+      (this.pendingReservations.get(documentUri)?.size ?? 0) > 0
+    );
+  }
+
+  private maybeEvictDocument(documentUri: string): void {
+    if (!this.hasDocumentActivity(documentUri)) {
+      this.generations.delete(documentUri);
+      this.pendingReservations.delete(documentUri);
     }
   }
 
