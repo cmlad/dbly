@@ -225,19 +225,18 @@ async function runCurrentStatement(
   const reservation = postgresSessions!.reserve(documentUri);
   let connectionName: string;
   let connection: ConnectionConfig;
-  let password: string | undefined;
   try {
     ({ connectionName, connection } = await resolveConnection(editor.document));
-    password =
-      connection.type === "postgres"
-        ? await context.secrets.get(postgresPasswordKey(connectionName))
-        : undefined;
   } catch (error) {
     reservation.release();
     throw error;
   }
   if (connection.type === "bigquery") {
-    reservation.release();
+    try {
+      await postgresSessions!.closeDocument(documentUri);
+    } finally {
+      reservation.release();
+    }
   }
   panel.beginRun(runId);
   const started = performance.now();
@@ -249,7 +248,7 @@ async function runCurrentStatement(
         ? await reservation.execute(
             connectionName,
             connection,
-            password,
+            () => context.secrets.get(postgresPasswordKey(connectionName)),
             sql,
           )
         : await new BigQueryExecutor(connection).execute(sql);

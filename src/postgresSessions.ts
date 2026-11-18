@@ -48,7 +48,7 @@ export interface PostgresRunReservation {
   execute(
     connectionName: string,
     config: PostgresConnectionConfig,
-    password: string | undefined,
+    readPassword: () => PromiseLike<string | undefined>,
     sql: string,
   ): Promise<DriverResult>;
   release(): void;
@@ -86,7 +86,7 @@ export class PostgresSessionRegistry {
 
     let state: "pending" | "executing" | "released" = "pending";
     return {
-      execute: (connectionName, config, password, sql) => {
+      execute: (connectionName, config, readPassword, sql) => {
         if (state !== "pending") {
           return Promise.reject(
             new Error("PostgreSQL run reservation is no longer available"),
@@ -98,7 +98,7 @@ export class PostgresSessionRegistry {
             documentUri,
             connectionName,
             config,
-            password,
+            readPassword,
             sql,
             invocationGeneration,
           ),
@@ -119,10 +119,12 @@ export class PostgresSessionRegistry {
     documentUri: string,
     connectionName: string,
     config: PostgresConnectionConfig,
-    password: string | undefined,
+    readPassword: () => PromiseLike<string | undefined>,
     sql: string,
     invocationGeneration: number,
   ): Promise<DriverResult> {
+    this.assertGeneration(documentUri, invocationGeneration);
+    const password = await readPassword();
     this.assertGeneration(documentUri, invocationGeneration);
     const entry = await this.getOrCreateSession(
       documentUri,

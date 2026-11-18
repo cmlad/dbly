@@ -78,7 +78,7 @@ test("reuses one client and serializes runs for a document", async () => {
   const secondRun = secondReservation.execute(
     "local",
     CONNECTION,
-    undefined,
+    async () => undefined,
     "SELECT second",
   );
   await waitForImmediate();
@@ -87,7 +87,7 @@ test("reuses one client and serializes runs for a document", async () => {
   const firstRun = firstReservation.execute(
     "local",
     CONNECTION,
-    undefined,
+    async () => undefined,
     "SELECT first",
   );
   await firstStarted.promise;
@@ -153,12 +153,12 @@ test("bounds reconnect termination, retains cleanup, and cancels queued runs", a
 
   const activeRun = registry
     .reserve("file:///slow.sql")
-    .execute("local", CONNECTION, undefined, "SELECT slow");
+    .execute("local", CONNECTION, async () => undefined, "SELECT slow");
   await queryStarted.promise;
   const activeFailure = assert.rejects(activeRun, /session closed/);
   const queuedRun = registry
     .reserve("file:///slow.sql")
-    .execute("local", CONNECTION, undefined, "SELECT queued");
+    .execute("local", CONNECTION, async () => undefined, "SELECT queued");
   const queuedFailure = assert.rejects(queuedRun, /session reset/);
 
   const reconnect = registry.reconnect("file:///slow.sql");
@@ -177,9 +177,72 @@ test("bounds reconnect termination, retains cleanup, and cancels queued runs", a
   const noSession = await registry.reconnect("file:///preflight.sql");
   assert.equal(noSession.hadSession, false);
   await assert.rejects(
-    preflight.execute("local", CONNECTION, undefined, "SELECT late"),
+    preflight.execute(
+      "local",
+      CONNECTION,
+      async () => undefined,
+      "SELECT late",
+    ),
     /session reset/,
   );
+});
+
+test("document cutover closes PostgreSQL state before BigQuery", async () => {
+  const session = new FakeClient((sql) => Promise.resolve(queryResult(sql)));
+  const registry = new PostgresSessionRegistry(
+    () => undefined,
+    () => session as unknown as Client,
+  );
+  await registry
+    .reserve("file:///cutover.sql")
+    .execute("local", CONNECTION, async () => undefined, "SELECT 1");
+
+  const pending = registry.reserve("file:///cutover.sql");
+  await registry.closeDocument("file:///cutover.sql");
+  assert.equal(session.endCalls, 1);
+  await assert.rejects(
+    pending.execute(
+      "local",
+      CONNECTION,
+      async () => undefined,
+      "SELECT stale",
+    ),
+    /session reset/,
+  );
+});
+
+test("reads a queued run password only when its turn starts", async () => {
+  const session = new FakeClient((sql) => Promise.resolve(queryResult(sql)));
+  let clientPassword: ClientConfig["password"];
+  const registry = new PostgresSessionRegistry(
+    () => undefined,
+    (config) => {
+      clientPassword = config.password;
+      return session as unknown as Client;
+    },
+  );
+  const blocker = registry.reserve("file:///password.sql");
+  const queued = registry.reserve("file:///password.sql");
+  let currentPassword = "old";
+  let passwordReads = 0;
+  const run = queued.execute(
+    "local",
+    CONNECTION,
+    async () => {
+      passwordReads += 1;
+      return currentPassword;
+    },
+    "SELECT 1",
+  );
+  await waitForImmediate();
+  assert.equal(passwordReads, 0);
+
+  currentPassword = "new";
+  blocker.release();
+  await run;
+  assert.equal(passwordReads, 1);
+  assert.equal(clientPassword, "new");
+  await registry.disposeAll();
 });
 
 function queryResult(value: string): unknown {
