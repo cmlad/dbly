@@ -209,15 +209,16 @@ export class ResultsPanel implements vscode.Disposable {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>dbly Results</title>
   <style nonce="${nonce}">
-    body { color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); padding: 12px; }
-    header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+    html, body { height: 100%; }
+    body { color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); margin: 0; padding: 8px 12px 0; box-sizing: border-box; display: flex; flex-direction: column; }
+    header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; flex: none; }
     #connection { font-weight: 600; }
     #summary, #error { white-space: pre-wrap; }
     #error { color: var(--vscode-errorForeground); }
     #actions { display: none; gap: 8px; }
     button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; padding: 5px 10px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
-    .table-wrap { overflow: auto; max-height: calc(100vh - 100px); }
+    .table-wrap { overflow: auto; flex: 1; min-height: 0; }
     table { border-collapse: collapse; min-width: 100%; }
     th, td { border: 1px solid var(--vscode-panel-border); padding: 4px 8px; text-align: left; white-space: nowrap; vertical-align: top; position: relative; }
     .value { display: block; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
