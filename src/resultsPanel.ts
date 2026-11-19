@@ -225,6 +225,7 @@ export class ResultsPanel implements vscode.Disposable {
     .copy { display: none; position: absolute; top: 1px; right: 1px; padding: 1px 6px; font-size: 11px; }
     td:hover .copy { display: block; }
     th { position: sticky; top: 0; background: var(--vscode-editor-background); }
+    .rownum { color: var(--vscode-descriptionForeground); text-align: right; user-select: none; }
     .resizer { position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; cursor: col-resize; z-index: 1; }
     .resizer:hover, body.resizing .resizer { background: var(--vscode-focusBorder); }
     body.resizing { cursor: col-resize; user-select: none; }
@@ -259,7 +260,7 @@ export class ResultsPanel implements vscode.Disposable {
     copyButton.type = 'button';
     copyButton.textContent = 'Copy';
     table.addEventListener('mouseover', (event) => {
-      const cell = event.target instanceof Element ? event.target.closest('td') : null;
+      const cell = event.target instanceof Element ? event.target.closest('td:not(.rownum)') : null;
       if (cell !== null && copyButton.parentElement !== cell) {
         copyButton.textContent = 'Copy';
         cell.appendChild(copyButton);
@@ -280,9 +281,8 @@ export class ResultsPanel implements vscode.Disposable {
       }
       event.preventDefault();
       const header = event.target.parentElement;
-      const index = Array.prototype.indexOf.call(header.parentElement.children, header);
       drag = {
-        rule: columnSheet.cssRules[index],
+        rule: columnSheet.cssRules[Number(header.dataset.column)],
         startX: event.clientX,
         startWidth: header.querySelector('.value').getBoundingClientRect().width,
       };
@@ -306,8 +306,7 @@ export class ResultsPanel implements vscode.Disposable {
         return;
       }
       const header = event.target.parentElement;
-      const index = Array.prototype.indexOf.call(header.parentElement.children, header);
-      const rule = columnSheet.cssRules[index];
+      const rule = columnSheet.cssRules[Number(header.dataset.column)];
       rule.style.width = '';
       rule.style.maxWidth = 'none';
     });
@@ -333,12 +332,18 @@ export class ResultsPanel implements vscode.Disposable {
 
       actions.style.display = 'flex';
       const headRow = document.createElement('tr');
+      const numberHeader = document.createElement('th');
+      numberHeader.className = 'rownum';
+      numberHeader.textContent = '#';
+      headRow.appendChild(numberHeader);
       while (columnSheet.cssRules.length > 0) {
         columnSheet.deleteRule(0);
       }
       state.columns.forEach((column, index) => {
-        columnSheet.insertRule('tr > :nth-child(' + (index + 1) + ') > .value {}', index);
+        // +2: nth-child is 1-based and the row-number column comes first.
+        columnSheet.insertRule('tr > :nth-child(' + (index + 2) + ') > .value {}', index);
         const cell = document.createElement('th');
+        cell.dataset.column = String(index);
         const value = document.createElement('span');
         value.className = 'value';
         value.textContent = column;
@@ -353,8 +358,12 @@ export class ResultsPanel implements vscode.Disposable {
       table.appendChild(head);
 
       const body = document.createElement('tbody');
-      for (const row of state.rows) {
+      state.rows.forEach((row, rowIndex) => {
         const tableRow = document.createElement('tr');
+        const number = document.createElement('td');
+        number.className = 'rownum';
+        number.textContent = String(rowIndex + 1);
+        tableRow.appendChild(number);
         for (const raw of row) {
           const text = raw === null ? '' : String(raw);
           const cell = document.createElement('td');
@@ -366,7 +375,7 @@ export class ResultsPanel implements vscode.Disposable {
           tableRow.appendChild(cell);
         }
         body.appendChild(tableRow);
-      }
+      });
       table.appendChild(body);
     });
 
