@@ -90,7 +90,8 @@ export class ResultsPanel implements vscode.Disposable {
       return;
     }
     if (this.panel !== undefined) {
-      this.panel.reveal(vscode.ViewColumn.Beside, true);
+      // Keep the panel wherever the user moved it (e.g. a bottom editor group).
+      this.panel.reveal(undefined, true);
       return;
     }
 
@@ -223,7 +224,11 @@ export class ResultsPanel implements vscode.Disposable {
     .copy { display: none; position: absolute; top: 1px; right: 1px; padding: 1px 6px; font-size: 11px; }
     td:hover .copy { display: block; }
     th { position: sticky; top: 0; background: var(--vscode-editor-background); }
+    .resizer { position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; cursor: col-resize; z-index: 1; }
+    .resizer:hover, body.resizing .resizer { background: var(--vscode-focusBorder); }
+    body.resizing { cursor: col-resize; user-select: none; }
   </style>
+  <style id="columns" nonce="${nonce}"></style>
 </head>
 <body>
   <header>
@@ -265,6 +270,36 @@ export class ResultsPanel implements vscode.Disposable {
       copyButton.textContent = 'Copied';
     });
 
+    // Column widths live in one CSS rule per column so dragging touches no cells.
+    const columnSheet = document.getElementById('columns').sheet;
+    let drag = null;
+    table.addEventListener('mousedown', (event) => {
+      if (!(event.target instanceof Element) || !event.target.classList.contains('resizer')) {
+        return;
+      }
+      event.preventDefault();
+      const header = event.target.parentElement;
+      const index = Array.prototype.indexOf.call(header.parentElement.children, header);
+      drag = {
+        rule: columnSheet.cssRules[index],
+        startX: event.clientX,
+        startWidth: header.querySelector('.value').getBoundingClientRect().width,
+      };
+      document.body.classList.add('resizing');
+    });
+    document.addEventListener('mousemove', (event) => {
+      if (drag === null) {
+        return;
+      }
+      const width = Math.max(30, drag.startWidth + event.clientX - drag.startX) + 'px';
+      drag.rule.style.width = width;
+      drag.rule.style.maxWidth = width;
+    });
+    document.addEventListener('mouseup', () => {
+      drag = null;
+      document.body.classList.remove('resizing');
+    });
+
     window.addEventListener('message', (event) => {
       const state = event.data;
       connection.textContent = state.connectionName;
@@ -286,15 +321,21 @@ export class ResultsPanel implements vscode.Disposable {
 
       actions.style.display = 'flex';
       const headRow = document.createElement('tr');
-      for (const column of state.columns) {
+      while (columnSheet.cssRules.length > 0) {
+        columnSheet.deleteRule(0);
+      }
+      state.columns.forEach((column, index) => {
+        columnSheet.insertRule('tr > :nth-child(' + (index + 1) + ') > .value {}', index);
         const cell = document.createElement('th');
         const value = document.createElement('span');
         value.className = 'value';
         value.textContent = column;
         value.title = column;
-        cell.appendChild(value);
+        const resizer = document.createElement('div');
+        resizer.className = 'resizer';
+        cell.append(value, resizer);
         headRow.appendChild(cell);
-      }
+      });
       const head = document.createElement('thead');
       head.appendChild(headRow);
       table.appendChild(head);
