@@ -311,6 +311,9 @@ export class PostgresSessionRegistry {
       user: config.user,
       database: config.database,
       ...(password === undefined ? {} : { password }),
+      ...(config.sslmode === "disable"
+        ? {}
+        : { ssl: { rejectUnauthorized: config.sslmode === "verify-full" } }),
     };
     const client = this.createClient(clientConfig);
     const entry: PostgresSessionEntry = {

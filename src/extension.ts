@@ -338,7 +338,7 @@ function postgresQueryErrorMessage(error: unknown): string {
       message,
     )
   ) {
-    return `${message} Run "dbly: Set Password" to store the PostgreSQL password.`;
+    return `${message} Run "dbly: Set Connection Password" to store the PostgreSQL password.`;
   }
   return message;
 }

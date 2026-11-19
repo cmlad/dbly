@@ -22,7 +22,7 @@
       },
       {
         "command": "dbly.setPassword",
-        "title": "dbly: Set Password"
+        "title": "dbly: Set Connection Password"
       },
       {
         "command": "dbly.reconnect",

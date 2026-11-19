@@ -11,6 +11,8 @@ export type ConnectionConfig =
   | PostgresConnectionConfig
   | BigQueryConnectionConfig;
 
+export type PostgresSslMode = "disable" | "require" | "verify-full";
+
 export interface PostgresConnectionConfig {
   type: "postgres";
   host: string;
@@ -18,6 +20,7 @@ export interface PostgresConnectionConfig {
   user: string;
   database: string;
   schema: string;
+  sslmode: PostgresSslMode;
 }
 
 export type BigQueryAuth =
@@ -116,6 +119,11 @@ function normalizePostgres(
     port = rawPort;
   }
 
+  const sslmode = connection.sslmode ?? "disable";
+  if (sslmode !== "disable" && sslmode !== "require" && sslmode !== "verify-full") {
+    throw new Error(`${label}.sslmode must be disable, require, or verify-full`);
+  }
+
   return {
     type: "postgres",
     host: requiredString(connection, "host", label),
@@ -123,6 +131,7 @@ function normalizePostgres(
     user: requiredString(connection, "user", label),
     database: requiredString(connection, "database", label),
     schema: requiredString(connection, "schema", label),
+    sslmode,
   };
 }
 

@@ -5,7 +5,7 @@ dbly is a small VS Code query runner for PostgreSQL and BigQuery. It activates f
 ## Commands
 
 - **dbly: Select Connection** writes or replaces `-- dbly: <connection name>` on line 1 of the active SQL document.
-- **dbly: Set Password** stores a PostgreSQL password in VS Code SecretStorage and closes active sessions that use that connection.
+- **dbly: Set Connection Password** stores a PostgreSQL password in VS Code SecretStorage and closes active sessions that use that connection.
 - **dbly: Reconnect** closes the active document's PostgreSQL session. BigQuery has no persistent session.
 - **dbly: Run Current Statement** runs the selected text, or the paragraph at the cursor when there is no selection.
 
@@ -21,6 +21,7 @@ connections:
     type: postgres
     host: localhost
     port: 5432 # optional; defaults to 5432
+    sslmode: require # optional; disable (default), require (encrypt, no cert check), or verify-full
     user: chris
     database: app_development
     schema: public
@@ -42,7 +43,7 @@ connections:
 
 dbly reloads this file for every command, so ordinary edits apply without restarting VS Code.
 
-PostgreSQL passwords do not belong in YAML. Run **dbly: Set Password** to save a non-empty password with VS Code SecretStorage. On desktop VS Code, Electron safe storage encrypts these secrets and macOS Keychain protects the safe-storage encryption material. dbly accesses secrets only through the VS Code API; it does not claim or require a separate Keychain item for each password. If no secret is stored, the PostgreSQL driver receives no explicit password, allowing trust/passwordless and normal driver environment authentication.
+PostgreSQL passwords do not belong in YAML. Run **dbly: Set Connection Password** to save a non-empty password with VS Code SecretStorage. On desktop VS Code, Electron safe storage encrypts these secrets and macOS Keychain protects the safe-storage encryption material. dbly accesses secrets only through the VS Code API; it does not claim or require a separate Keychain item for each password. If no secret is stored, the PostgreSQL driver receives no explicit password, allowing trust/passwordless and normal driver environment authentication.
 
 BigQuery uses Application Default Credentials when `auth` is omitted or set to `type: adc`. For local ADC setup, run:
 

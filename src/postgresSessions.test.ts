@@ -12,6 +12,7 @@ const CONNECTION: PostgresConnectionConfig = {
   user: "dbly",
   database: "dbly_test",
   schema: "public",
+  sslmode: "disable",
 };
 
 class FakeClient {
