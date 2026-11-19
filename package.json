@@ -3,6 +3,7 @@
   "displayName": "dbly",
   "description": "A small PostgreSQL and BigQuery query runner for SQL files.",
   "version": "0.0.1",
+  "publisher": "chris",
   "private": true,
   "engines": {
     "vscode": "^1.101.0"
