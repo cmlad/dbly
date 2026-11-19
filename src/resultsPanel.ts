@@ -142,6 +142,18 @@ export class ResultsPanel implements vscode.Disposable {
       return;
     }
 
+    if (
+      message !== null &&
+      typeof message === "object" &&
+      "type" in message &&
+      message.type === "copy" &&
+      "text" in message &&
+      typeof message.text === "string"
+    ) {
+      await vscode.env.clipboard.writeText(message.text);
+      return;
+    }
+
     if (this.exportResult === undefined) {
       return;
     }
@@ -206,7 +218,10 @@ export class ResultsPanel implements vscode.Disposable {
     button:hover { background: var(--vscode-button-hoverBackground); }
     .table-wrap { overflow: auto; max-height: calc(100vh - 100px); }
     table { border-collapse: collapse; min-width: 100%; }
-    th, td { border: 1px solid var(--vscode-panel-border); padding: 4px 8px; text-align: left; white-space: pre-wrap; vertical-align: top; }
+    th, td { border: 1px solid var(--vscode-panel-border); padding: 4px 8px; text-align: left; white-space: nowrap; vertical-align: top; position: relative; }
+    .value { display: block; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .copy { display: none; position: absolute; top: 1px; right: 1px; padding: 1px 6px; font-size: 11px; }
+    td:hover .copy { display: block; }
     th { position: sticky; top: 0; background: var(--vscode-editor-background); }
   </style>
 </head>
@@ -232,6 +247,24 @@ export class ResultsPanel implements vscode.Disposable {
     document.getElementById('export').addEventListener('click', () => vscode.postMessage({ type: 'exportCsv' }));
     document.getElementById('open').addEventListener('click', () => vscode.postMessage({ type: 'openCsv' }));
 
+    // One shared copy button, moved into whichever cell is hovered.
+    const copyButton = document.createElement('button');
+    copyButton.className = 'copy';
+    copyButton.type = 'button';
+    copyButton.textContent = 'Copy';
+    table.addEventListener('mouseover', (event) => {
+      const cell = event.target instanceof Element ? event.target.closest('td') : null;
+      if (cell !== null && copyButton.parentElement !== cell) {
+        copyButton.textContent = 'Copy';
+        cell.appendChild(copyButton);
+      }
+    });
+    copyButton.addEventListener('click', () => {
+      const value = copyButton.parentElement?.querySelector('.value');
+      vscode.postMessage({ type: 'copy', text: value ? value.textContent : '' });
+      copyButton.textContent = 'Copied';
+    });
+
     window.addEventListener('message', (event) => {
       const state = event.data;
       connection.textContent = state.connectionName;
@@ -255,7 +288,11 @@ export class ResultsPanel implements vscode.Disposable {
       const headRow = document.createElement('tr');
       for (const column of state.columns) {
         const cell = document.createElement('th');
-        cell.textContent = column;
+        const value = document.createElement('span');
+        value.className = 'value';
+        value.textContent = column;
+        value.title = column;
+        cell.appendChild(value);
         headRow.appendChild(cell);
       }
       const head = document.createElement('thead');
@@ -265,9 +302,14 @@ export class ResultsPanel implements vscode.Disposable {
       const body = document.createElement('tbody');
       for (const row of state.rows) {
         const tableRow = document.createElement('tr');
-        for (const value of row) {
+        for (const raw of row) {
+          const text = raw === null ? '' : String(raw);
           const cell = document.createElement('td');
-          cell.textContent = value === null ? '' : String(value);
+          const value = document.createElement('span');
+          value.className = 'value';
+          value.textContent = text;
+          value.title = text;
+          cell.appendChild(value);
           tableRow.appendChild(cell);
         }
         body.appendChild(tableRow);
