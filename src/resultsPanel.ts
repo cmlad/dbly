@@ -299,6 +299,17 @@ export class ResultsPanel implements vscode.Disposable {
       drag = null;
       document.body.classList.remove('resizing');
     });
+    // Double-click a header edge to fit the column to its longest value.
+    table.addEventListener('dblclick', (event) => {
+      if (!(event.target instanceof Element) || !event.target.classList.contains('resizer')) {
+        return;
+      }
+      const header = event.target.parentElement;
+      const index = Array.prototype.indexOf.call(header.parentElement.children, header);
+      const rule = columnSheet.cssRules[index];
+      rule.style.width = '';
+      rule.style.maxWidth = 'none';
+    });
 
     window.addEventListener('message', (event) => {
       const state = event.data;
