@@ -1,14 +1,13 @@
-import { BigQuery } from "@google-cloud/bigquery";
+import {
+  BigQuery,
+  BigQueryDate,
+  BigQueryDatetime,
+  BigQueryTime,
+  BigQueryTimestamp,
+  Geography,
+} from "@google-cloud/bigquery";
 import type { BigQueryConnectionConfig } from "./config";
 import { normalizeCell, type DriverResult } from "./database";
-
-const BIGQUERY_WRAPPER_NAMES: Record<string, true> = {
-  BigQueryDate: true,
-  BigQueryDatetime: true,
-  BigQueryTime: true,
-  BigQueryTimestamp: true,
-  Geography: true,
-};
 
 export function castBigQueryInteger(value: string): string {
   return value;
@@ -25,20 +24,19 @@ export function normalizeBigQueryValue(value: unknown): unknown {
     return value;
   }
 
-  const constructorName = value.constructor?.name;
+  // Use instanceof / duck typing: bundling renames classes (e.g. Big -> Big2),
+  // so constructor names are not reliable.
   if (
-    constructorName !== undefined &&
-    BIGQUERY_WRAPPER_NAMES[constructorName] === true &&
-    "value" in value &&
-    typeof value.value === "string"
+    value instanceof BigQueryDate ||
+    value instanceof BigQueryDatetime ||
+    value instanceof BigQueryTime ||
+    value instanceof BigQueryTimestamp ||
+    value instanceof Geography
   ) {
     return value.value;
   }
-  if (
-    constructorName === "Big" &&
-    "toFixed" in value &&
-    typeof value.toFixed === "function"
-  ) {
+  // big.js values (NUMERIC / BIGNUMERIC).
+  if ("toFixed" in value && typeof value.toFixed === "function") {
     return value.toFixed();
   }
 
