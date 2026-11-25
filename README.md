@@ -69,6 +69,7 @@ dbly does not parse SQL or split on semicolons. If a run contains several Postgr
 - Drag a header's right edge to resize a column; double-click the edge to fit the column to its content.
 - **Export CSV** saves the full result to a file; **Open in Editor** opens it as an unsaved CSV document.
 - All rows are loaded; there is no row limit or paging, so very large results use a lot of memory.
+- Errors show the message plus full details (error type, driver fields such as PostgreSQL code/detail/hint, nested errors, stack). **Copy error** copies all of it; passwords, tokens, and HTTP auth headers are left out.
 
 ## PostgreSQL sessions and transactions
 

@@ -11,6 +11,7 @@ import {
   hasConnectionComment,
   parseConnectionName,
 } from "./connectionComment";
+import { describeError } from "./errorDetail";
 import { PostgresSessionRegistry } from "./postgresSessions";
 import { ResultsPanel } from "./resultsPanel";
 import { findStatementAtLine } from "./statement";
@@ -273,6 +274,7 @@ async function runCurrentStatement(
         connection.type === "postgres"
           ? postgresQueryErrorMessage(error)
           : errorMessage(error),
+      detail: describeError(error),
     });
   } finally {
     reservation.release();
@@ -344,11 +346,19 @@ function postgresQueryErrorMessage(error: unknown): string {
 }
 
 function errorMessage(error: unknown): string {
+  // Connecting to "localhost" tries ::1 and 127.0.0.1; when both fail Node
+  // throws an AggregateError with an empty message, so show the inner errors.
+  if (error instanceof AggregateError && error.errors.length > 0) {
+    return [...new Set(error.errors.map(errorMessage))].join("; ");
+  }
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
   }
   if (typeof error === "string" && error.trim().length > 0) {
     return error;
+  }
+  if (error !== null && typeof error === "object" && "code" in error) {
+    return `dbly: connection failed (${String(error.code)}).`;
   }
   return "dbly: An unknown error occurred.";
 }

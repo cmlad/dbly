@@ -14,6 +14,8 @@ export interface RunFailure {
   connectionName: string;
   durationMs: number;
   message: string;
+  /** Full error dump (type, driver fields, nested errors, stack) for display and copy. */
+  detail: string;
 }
 
 interface RunRunning {
@@ -214,7 +216,10 @@ export class ResultsPanel implements vscode.Disposable {
     header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; flex: none; }
     #connection { font-weight: 600; }
     #summary, #error { white-space: pre-wrap; }
-    #error { color: var(--vscode-errorForeground); }
+    #error { color: var(--vscode-errorForeground); font-weight: 600; }
+    #error-box { display: none; flex: 1; min-height: 0; overflow: auto; padding-bottom: 8px; }
+    #error-box button { margin: 8px 0; }
+    #error-detail { margin: 0; white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); color: var(--vscode-descriptionForeground); }
     #actions { display: none; gap: 8px; }
     button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; padding: 5px 10px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
@@ -241,7 +246,11 @@ export class ResultsPanel implements vscode.Disposable {
       <button id="open" type="button">Open in Editor</button>
     </span>
   </header>
-  <div id="error"></div>
+  <div id="error-box">
+    <div id="error"></div>
+    <button id="copy-error" type="button">Copy error</button>
+    <pre id="error-detail"></pre>
+  </div>
   <div class="table-wrap"><table id="table"></table></div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -249,10 +258,18 @@ export class ResultsPanel implements vscode.Disposable {
     const summary = document.getElementById('summary');
     const actions = document.getElementById('actions');
     const error = document.getElementById('error');
+    const errorBox = document.getElementById('error-box');
+    const errorDetail = document.getElementById('error-detail');
+    const copyError = document.getElementById('copy-error');
     const table = document.getElementById('table');
+    const tableWrap = table.parentElement;
 
     document.getElementById('export').addEventListener('click', () => vscode.postMessage({ type: 'exportCsv' }));
     document.getElementById('open').addEventListener('click', () => vscode.postMessage({ type: 'openCsv' }));
+    copyError.addEventListener('click', () => {
+      vscode.postMessage({ type: 'copy', text: error.textContent + '\\n\\n' + errorDetail.textContent });
+      copyError.textContent = 'Copied';
+    });
 
     // One shared copy button, moved into whichever cell is hovered.
     const copyButton = document.createElement('button');
@@ -316,6 +333,9 @@ export class ResultsPanel implements vscode.Disposable {
       connection.textContent = state.connectionName;
       summary.textContent = '';
       error.textContent = '';
+      errorDetail.textContent = '';
+      errorBox.style.display = 'none';
+      tableWrap.style.display = 'block';
       actions.style.display = 'none';
       table.replaceChildren();
 
@@ -326,6 +346,10 @@ export class ResultsPanel implements vscode.Disposable {
       if (state.status === 'error') {
         summary.textContent = Math.round(state.durationMs) + ' ms';
         error.textContent = state.message;
+        errorDetail.textContent = state.detail;
+        errorBox.style.display = 'block';
+        tableWrap.style.display = 'none';
+        copyError.textContent = 'Copy error';
         return;
       }
       summary.textContent = state.rowCount + ' rows · ' + Math.round(state.durationMs) + ' ms';
